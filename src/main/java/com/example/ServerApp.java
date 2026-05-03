@@ -3,26 +3,29 @@ package com.example;
 import javax.swing.*;
 import java.awt.*;
 import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 
 public class ServerApp extends JFrame {
     private final String[] names;
+    private final int port;
     private final JLabel[] scoreLabels;
     private final int[] totalScores;
     private int submissionCount = 0;
 
-    public ServerApp(String[] names) {
+    public ServerApp(int port, String[] names) {
+        this.port = port;
         this.names = names.clone();
         this.scoreLabels = new JLabel[this.names.length];
         this.totalScores = new int[this.names.length];
 
-        setTitle("Rating Server (Host)");
+        setTitle("Rating Server (Host) — port " + port);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new GridLayout(this.names.length + 1, 1, 10, 10));
-        setSize(300, 250);
+        setSize(360, Math.max(200, 40 * (this.names.length + 2)));
 
-        JLabel titleLabel = new JLabel("Átlagos százalékok:", SwingConstants.CENTER);
+        JLabel titleLabel = new JLabel("Average %:", SwingConstants.CENTER);
         titleLabel.setFont(new Font("Arial", Font.BOLD, 14));
         add(titleLabel);
 
@@ -35,14 +38,12 @@ public class ServerApp extends JFrame {
     }
 
     private void startServer() {
-        // Start the server socket on a background thread
         Thread.startVirtualThread(() -> {
-            try (ServerSocket serverSocket = new ServerSocket(Constants.PORT)) {
-                System.out.println("Server started on port " + Constants.PORT);
+            try (ServerSocket serverSocket = new ServerSocket(port)) {
+                System.out.println("Server started on port " + port);
 
                 while (true) {
                     Socket clientSocket = serverSocket.accept();
-                    // Handle each client connection in a new virtual thread
                     Thread.ofVirtual().start(() -> handleClient(clientSocket));
                 }
             } catch (Exception e) {
@@ -52,15 +53,20 @@ public class ServerApp extends JFrame {
     }
 
     private void handleClient(Socket socket) {
-        try (socket; ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-            // Read the array of 5 integers sent by the client
+        try (socket) {
+            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+            int[] bounds = RatingBounds.compute(names.length);
+            out.writeObject(new SessionConfig(names, bounds[0], bounds[1]));
+            out.flush();
+
+            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
             int[] ratings = (int[]) in.readObject();
 
             if (ratings != null && ratings.length == names.length) {
                 updateAverages(ratings);
             }
         } catch (Exception e) {
-            System.err.println("Error reading from client: " + e.getMessage());
+            System.err.println("Error handling client: " + e.getMessage());
         }
     }
 
@@ -79,20 +85,60 @@ public class ServerApp extends JFrame {
         });
     }
 
-    private static String[] askNames(Component parent) {
-        JPanel panel = new JPanel(new GridLayout(Constants.NAMES.length, 2, 8, 8));
-        JTextField[] nameFields = new JTextField[Constants.NAMES.length];
-
-        for (int i = 0; i < Constants.NAMES.length; i++) {
-            panel.add(new JLabel("Person " + (i + 1) + " name:", SwingConstants.RIGHT));
-            nameFields[i] = new JTextField(Constants.NAMES[i], 14);
-            panel.add(nameFields[i]);
+    private static Integer parsePort(String text) {
+        try {
+            int p = Integer.parseInt(text.trim());
+            if (p >= 1 && p <= 65535) {
+                return p;
+            }
+        } catch (NumberFormatException ignored) {
         }
+        return null;
+    }
+
+    private static ServerSetup askServerSetup(Component parent) {
+        JPanel root = new JPanel(new BorderLayout(8, 8));
+
+        JPanel top = new JPanel(new GridLayout(2, 2, 8, 8));
+        top.add(new JLabel("Port:", SwingConstants.RIGHT));
+        JTextField portField = new JTextField(String.valueOf(Constants.DEFAULT_PORT), 8);
+        top.add(portField);
+        top.add(new JLabel("Number of members:", SwingConstants.RIGHT));
+        SpinnerNumberModel countModel = new SpinnerNumberModel(5, RatingBounds.MIN_MEMBERS, RatingBounds.MAX_MEMBERS, 1);
+        JSpinner countSpinner = new JSpinner(countModel);
+        top.add(countSpinner);
+
+        JPanel namesPanel = new JPanel();
+        JScrollPane scroll = new JScrollPane(namesPanel);
+        scroll.setPreferredSize(new Dimension(360, 220));
+
+        JTextField[][] nameFieldsRef = new JTextField[1][];
+
+        Runnable rebuildNames = () -> {
+            int n = (Integer) countSpinner.getValue();
+            namesPanel.removeAll();
+            namesPanel.setLayout(new GridLayout(n, 2, 8, 8));
+            JTextField[] fields = new JTextField[n];
+            for (int i = 0; i < n; i++) {
+                namesPanel.add(new JLabel("Person " + (i + 1) + " name:", SwingConstants.RIGHT));
+                fields[i] = new JTextField("Member" + (i + 1), 14);
+                namesPanel.add(fields[i]);
+            }
+            nameFieldsRef[0] = fields;
+            namesPanel.revalidate();
+            namesPanel.repaint();
+        };
+
+        countSpinner.addChangeListener(e -> rebuildNames.run());
+        rebuildNames.run();
+
+        root.add(top, BorderLayout.NORTH);
+        root.add(scroll, BorderLayout.CENTER);
 
         int result = JOptionPane.showConfirmDialog(
                 parent,
-                panel,
-                "Set person names",
+                root,
+                "Server setup",
                 JOptionPane.OK_CANCEL_OPTION,
                 JOptionPane.PLAIN_MESSAGE
         );
@@ -101,30 +147,42 @@ public class ServerApp extends JFrame {
             return null;
         }
 
-        String[] enteredNames = new String[Constants.NAMES.length];
-        for (int i = 0; i < enteredNames.length; i++) {
+        Integer port = parsePort(portField.getText());
+        if (port == null) {
+            JOptionPane.showMessageDialog(parent, "Port must be a number from 1 to 65535.", "Invalid port", JOptionPane.ERROR_MESSAGE);
+            return null;
+        }
+
+        JTextField[] nameFields = nameFieldsRef[0];
+        int n = nameFields.length;
+        String[] enteredNames = new String[n];
+        for (int i = 0; i < n; i++) {
             String value = nameFields[i].getText().trim();
             if (value.isEmpty()) {
+                JOptionPane.showMessageDialog(parent, "All member names are required.", "Invalid names", JOptionPane.ERROR_MESSAGE);
                 return null;
             }
             enteredNames[i] = value;
         }
-        return enteredNames;
+        return new ServerSetup(port, enteredNames);
+    }
+
+    private record ServerSetup(int port, String[] names) {
     }
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
-            String[] names = askNames(null);
-            if (names == null) {
+            ServerSetup setup = askServerSetup(null);
+            if (setup == null) {
                 JOptionPane.showMessageDialog(
                         null,
-                        "All names are required. Server start cancelled.",
+                        "Server start cancelled.",
                         "Setup Cancelled",
                         JOptionPane.WARNING_MESSAGE
                 );
                 return;
             }
-            new ServerApp(names).setVisible(true);
+            new ServerApp(setup.port(), setup.names()).setVisible(true);
         });
     }
 }

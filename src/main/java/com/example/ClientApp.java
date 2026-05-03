@@ -2,63 +2,98 @@ package com.example;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
 
 public class ClientApp extends JFrame {
-    private final String host;
-    private final JTextField[] ratingFields = new JTextField[Constants.NAMES.length];
+    private final SessionConfig session;
+    private final Socket socket;
+    private final ObjectOutputStream out;
+    private final JTextField[] ratingFields;
     private final JButton submitButton;
 
-    public ClientApp(String host) {
-        this.host = host;
-        setTitle("Rating Client");
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setLayout(new GridLayout(Constants.NAMES.length + 1, 2, 10, 10));
-        setSize(400, 250);
+    public ClientApp(SessionConfig session, Socket socket, ObjectOutputStream out) {
+        this.session = session;
+        this.socket = socket;
+        this.out = out;
 
-        for (int i = 0; i < Constants.NAMES.length; i++) {
-            add(new JLabel("Rating for " + Constants.NAMES[i] + " (5-35):", SwingConstants.RIGHT));
-            ratingFields[i] = new JTextField("20"); // Changed default to 20 so 5x20 = 100
+        int n = session.getMemberCount();
+        int min = session.getMinRating();
+        int max = session.getMaxRating();
+
+        setTitle("Rating Client (" + n + " members, " + min + "-" + max + "% each)");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setLayout(new GridLayout(n + 1, 2, 10, 10));
+        setSize(440, Math.max(220, 36 * (n + 2)));
+
+        ratingFields = new JTextField[n];
+        int[] defaults = defaultRatings(n);
+
+        for (int i = 0; i < n; i++) {
+            String name = session.getNames()[i];
+            add(new JLabel("Rating for " + name + " (" + min + "-" + max + "):", SwingConstants.RIGHT));
+            ratingFields[i] = new JTextField(String.valueOf(defaults[i]), 6);
             add(ratingFields[i]);
         }
 
         submitButton = new JButton("Submit Ratings");
-        submitButton.addActionListener(e -> sendRatings());
+        submitButton.addActionListener(e -> sendRatings(min, max));
 
         add(new JLabel("Total must be exactly 100", SwingConstants.RIGHT));
         add(submitButton);
+
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                try {
+                    socket.close();
+                } catch (Exception ignored) {
+                }
+            }
+        });
     }
 
-    private void sendRatings() {
-        int[] ratings = new int[Constants.NAMES.length];
-        int sum = 0;
+    private static int[] defaultRatings(int n) {
+        int[] v = new int[n];
+        int base = 100 / n;
+        int rem = 100 % n;
+        for (int i = 0; i < n; i++) {
+            v[i] = base + (i < rem ? 1 : 0);
+        }
+        return v;
+    }
 
-        // 1. Validate, parse input, and check bounds/sum
+    private void sendRatings(int min, int max) {
+        int n = session.getMemberCount();
+        int[] ratings = new int[n];
+        int sum = 0;
+        String[] names = session.getNames();
+
         try {
-            for (int i = 0; i < Constants.NAMES.length; i++) {
+            for (int i = 0; i < n; i++) {
                 int rating = Integer.parseInt(ratingFields[i].getText().trim());
 
-                // Constraint: Minimum 5, Maximum 35
-                if (rating < 5 || rating > 35) {
+                if (rating < min || rating > max) {
                     JOptionPane.showMessageDialog(this,
-                            "Rating for " + Constants.NAMES[i] + " must be between 5 and 35.",
+                            "Rating for " + names[i] + " must be between " + min + " and " + max + ".",
                             "Input Error",
                             JOptionPane.ERROR_MESSAGE);
-                    return; // Stop processing
+                    return;
                 }
 
                 ratings[i] = rating;
                 sum += rating;
             }
 
-            // Constraint: Total must exactly equal 100
             if (sum != 100) {
                 JOptionPane.showMessageDialog(this,
                         "Total ratings must add up to exactly 100.\nYour current total is: " + sum,
                         "Total Error",
                         JOptionPane.ERROR_MESSAGE);
-                return; // Stop processing
+                return;
             }
 
         } catch (NumberFormatException ex) {
@@ -66,18 +101,19 @@ public class ClientApp extends JFrame {
             return;
         }
 
-        // 2. Send data to server
-        try (Socket socket = new Socket(host, Constants.PORT);
-             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
-
+        try {
             out.writeObject(ratings);
             out.flush();
 
             JOptionPane.showMessageDialog(this, "Ratings submitted successfully!", "Success", JOptionPane.INFORMATION_MESSAGE);
             submitButton.setEnabled(false);
-
         } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "Could not connect to server. Is it running?", "Connection Error", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Could not send ratings: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        } finally {
+            try {
+                socket.close();
+            } catch (Exception ignored) {
+            }
         }
     }
 
@@ -85,13 +121,34 @@ public class ClientApp extends JFrame {
         String ip = JOptionPane.showInputDialog(
                 parent,
                 "Enter server IP address:",
-                Constants.HOST
+                "127.0.0.1"
         );
         if (ip == null) {
             return null;
         }
         ip = ip.trim();
         return ip.isEmpty() ? null : ip;
+    }
+
+    private static Integer askServerPort(Component parent) {
+        String p = JOptionPane.showInputDialog(
+                parent,
+                "Enter server port:",
+                String.valueOf(Constants.DEFAULT_PORT)
+        );
+        if (p == null) {
+            return null;
+        }
+        p = p.trim();
+        try {
+            int port = Integer.parseInt(p);
+            if (port >= 1 && port <= 65535) {
+                return port;
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        JOptionPane.showMessageDialog(parent, "Port must be a number from 1 to 65535.", "Invalid port", JOptionPane.ERROR_MESSAGE);
+        return null;
     }
 
     public static void main(String[] args) {
@@ -106,7 +163,26 @@ public class ClientApp extends JFrame {
                 );
                 return;
             }
-            new ClientApp(host).setVisible(true);
+            Integer port = askServerPort(null);
+            if (port == null) {
+                return;
+            }
+
+            try {
+                Socket socket = new Socket(host, port);
+                ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+                SessionConfig session = (SessionConfig) in.readObject();
+                ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+
+                new ClientApp(session, socket, out).setVisible(true);
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(
+                        null,
+                        "Could not connect to server or read session. Is it running on " + host + ":" + port + "?",
+                        "Connection Error",
+                        JOptionPane.ERROR_MESSAGE
+                );
+            }
         });
     }
 }
